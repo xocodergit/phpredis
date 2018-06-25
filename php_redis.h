@@ -233,6 +233,10 @@ PHP_METHOD(Redis, getPersistentID);
 PHP_METHOD(Redis, getAuth);
 PHP_METHOD(Redis, getMode);
 
+/* enable pipe after multi */
+PHP_METHOD(Redis, enableMultiPipeline); 
+PHP_METHOD(Redis, flushMultiPipeline);
+
 #ifdef ZTS
 #include "TSRM.h"
 #endif

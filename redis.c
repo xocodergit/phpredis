@@ -281,6 +281,8 @@ static zend_function_entry redis_functions[] = {
      PHP_ME(Redis, getKeys, arginfo_keys, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getLastError, arginfo_void, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getMode, arginfo_void, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, enableMultiPipeline, arginfo_void, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, flushMultiPipeline, arginfo_void, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getMultiple, arginfo_mget, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getOption, arginfo_getoption, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getPersistentID, arginfo_void, ZEND_ACC_PUBLIC)
@@ -3134,6 +3136,95 @@ PHP_METHOD(Redis, getMode) {
     } else {
         RETVAL_LONG(ATOMIC);
     }
+}
+
+PHP_METHOD(Redis, enableMultiPipeline) {
+    RedisSock *redis_sock;
+    zval *object;
+
+    if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(),
+                                     "O", &object, redis_ce) == FAILURE ||
+        (redis_sock = redis_sock_get(object TSRMLS_CC, 0)) == NULL
+    ) {
+        RETURN_FALSE;
+    }
+    if(!IS_MULTI(redis_sock)) {
+        RETURN_FALSE; // only in multi can call this method to enable pipeline
+    }
+
+    if (!IS_PIPELINE(redis_sock)) {
+        free_reply_callbacks(redis_sock);
+        REDIS_ENABLE_MODE(redis_sock, PIPELINE);
+    }
+
+    RETURN_ZVAL(getThis(), 1, 0);
+}
+
+static fold_item* copyLinkedList(const fold_item* old)
+{
+    const fold_item* oldListItem = old;
+    fold_item* newListHead = NULL;
+    fold_item* newListCurrent = NULL;
+    int size = 0;
+    while(oldListItem != NULL) {
+        if(newListHead == NULL) {
+            newListHead = malloc(sizeof(fold_item));
+            newListCurrent = newListHead;
+        }
+        else {
+            newListCurrent->next = malloc(sizeof(fold_item));
+            newListCurrent = newListCurrent->next;
+        }
+        memcpy(newListCurrent, oldListItem, sizeof(fold_item));
+
+        oldListItem = oldListItem->next;
+        ++size;
+    }
+    return newListHead;
+}
+
+PHP_METHOD(Redis, flushMultiPipeline) {
+    RedisSock *redis_sock;
+    char *cmd;
+    int cmd_len, ret;
+    zval *object;
+
+    if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(),
+                                     "O", &object, redis_ce) == FAILURE ||
+        (redis_sock = redis_sock_get(object TSRMLS_CC, 0)) == NULL
+    ) {
+        RETURN_FALSE;
+    }
+
+    if (!IS_PIPELINE(redis_sock) || !IS_MULTI(redis_sock)) {
+        RETURN_FALSE;
+    }
+    if (redis_sock->pipeline_cmd == NULL) {
+        /* Empty array when no command was run. */
+        array_init(return_value);
+        free_reply_callbacks(redis_sock);
+    } else {
+        fold_item* callbackListBackup = NULL;
+        if (redis_sock_write(redis_sock, redis_sock->pipeline_cmd,
+                    redis_sock->pipeline_len TSRMLS_CC) < 0) {
+            ZVAL_FALSE(return_value);
+        } else {
+            array_init(return_value);
+            // if in multi, copy fold_item list
+            if(IS_MULTI(redis_sock)) {
+                callbackListBackup = copyLinkedList(redis_sock->head);
+            }
+            redis_sock_read_multibulk_multi_reply_loop(
+                    INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, return_value, 0);
+        }
+        efree(redis_sock->pipeline_cmd);
+        redis_sock->pipeline_cmd = NULL;
+        redis_sock->pipeline_len = 0;
+        free_reply_callbacks(redis_sock);
+        assert(redis_sock->head == NULL);
+        redis_sock->head = callbackListBackup; // if have backup copy, then set it to head
+    }
+    REDIS_DISABLE_MODE(redis_sock, PIPELINE);
 }
 
 /* {{{ proto Redis::time() */
